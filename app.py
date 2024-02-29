@@ -1,221 +1,226 @@
-import time
-import os
-import sys
-import kivy
-from kivy.app import App
-from kivy.clock import Clock
-from kivy.uix.label import Label
-from kivy.uix.button import Button
-from kivy.core.window import Window
-from kivy.uix.dropdown import DropDown
-from kivy.uix.textinput import TextInput
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.scrollview import ScrollView
-from kivy.uix.screenmanager import ScreenManager, Screen
-kivy.require('2.0.0')
+import tkinter as tk
+from tkinter import scrolledtext, simpledialog, messagebox
+import threading
+import socket
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 
-import socket_client
-import rsa
+# Define global variables for host and port
+HOST = '127.0.0.1'
+PORT = 55555
 
-class ScrollableLabel(ScrollView):
+class CombinedApp:
+    def __init__(self, root):
+        self.root = root
+        self.setup_ui()
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.layout = GridLayout(cols = 1, size_hint_y = None)
-        self.add_widget(self.layout)
-        self.chat_history = Label(size_hint_y = None, markup = True)
-        self.scroll_to_point = Label()
+        # Server attributes
+        self.server = None
+        self.server_running = False
+        self.clients = []
+        self.client_public_keys = {}
 
-        self.layout.add_widget(self.chat_history)
-        self.layout.add_widget(self.scroll_to_point)
-    
-    def update_chat_history(self, message):
-        self.chat_history.text += '\n' + message
-        self.layout.height = self.chat_history.texture_size[1] + 15
-        self.chat_history.height = self.chat_history.texture_size[1]
-        self.chat_history.text_size = (self.chat_history.width * 0.98, None)
-        self.scroll_to(self.scroll_to_point)
+        # Client attributes
+        self.client = None
+        self.client_connected = False
+        self.client_nickname = None
+        self.client_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+        self.client_public_key = self.client_private_key.public_key()
 
-    def update_chat_history_layout(self, _ = None):
-        self.layout.height = self.chat_history.texture_size[1] + 15
-        self.chat_history.height = self.chat_history.texture_size[1]
-        self.chat_history.text_size = (self.chat_history.width * 0.98, None)
+        # Cryptography for the server
+        self.server_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+        self.server_public_key = self.server_private_key.public_key()
 
-class ConnectPage(GridLayout):
+        # Serialize server's public key to send to clients
+        self.serialized_server_public_key = self.server_public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if os.path.isfile('prev_details.txt'):
-            with open('prev_details.txt', 'r') as f:
-                d = f.read().split(",")
-                prev = {'ip':d[0], 'port': d[1], 'username': d[2]}
+    def setup_ui(self):
+        self.root.title("Combined Server/Client App")
+        self.root.geometry("800x600")
+
+        # Server GUI setup
+        self.server_frame = tk.LabelFrame(self.root, text="Server", padx=5, pady=5)
+        self.server_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        self.server_log = scrolledtext.ScrolledText(self.server_frame, width=50, height=20, state="disabled")
+        self.server_log.pack(padx=5, pady=5)
+        self.server_start_button = tk.Button(self.server_frame, text="Start Server", command=self.toggle_server)
+        self.server_start_button.pack(padx=5, pady=5)
+
+        # Client GUI setup
+        self.client_frame = tk.LabelFrame(self.root, text="Client", padx=5, pady=5)
+        self.client_frame.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        self.client_log = scrolledtext.ScrolledText(self.client_frame, width=50, height=20, state="disabled")
+        self.client_log.pack(padx=5, pady=5)
+        self.client_connect_button = tk.Button(self.client_frame, text="Connect as Client", command=self.toggle_client_connection)
+        self.client_connect_button.pack(padx=5, pady=5)
+        self.client_message_entry = tk.Entry(self.client_frame, width=48)
+        self.client_message_entry.pack(padx=5, pady=5)
+        self.client_send_button = tk.Button(self.client_frame, text="Send Message", command=self.send_client_message)
+        self.client_send_button.pack(padx=5, pady=5)
+
+    def toggle_server(self):
+        if not self.server_running:
+            self.start_server()
         else:
-            prev = {'ip': '', 'port': '', 'username': ''}
-        self.cols = 2
-        self.add_widget(Label(text="IP: "))
-        self.ip = TextInput(text = prev['ip'], multiline=False)
-        self.add_widget(self.ip)
-        self.add_widget(Label(text="Port: "))
-        self.port = TextInput(text = prev['port'], multiline=False)
-        self.add_widget(self.port)
-        self.add_widget(Label(text="Username: "))
-        self.username = TextInput(text = prev['username'], multiline=False)
-        self.add_widget(self.username)
-        self.join = Button(text="Join")
-        self.join.bind(on_press=self.join_button)
-        self.add_widget(Label())
-        self.add_widget(self.join)
-    
-    def join_button(self, instance):
-        port = self.port.text
-        ip = self.ip.text
-        username = self.username.text
-        with open('prev_details.txt', 'w') as f:
-            f.write(f'{ip},{port},{username}')
-        info = f'Trying to join {ip}:{port} as {username}'
-        chat_app.info_page.update_info(info)
-        chat_app.screen_manager.current = "Info"
-        Clock.schedule_once(self.connect, 1)
-    
-    def connect(self, _):
-        port = int(self.port.text)
-        ip = self.ip.text
-        username = self.username.text
-        if not socket_client.connect(ip, port, username, show_error):
-            return
+            self.stop_server()
+
+    def start_server(self):
+        self.server_running = True
+        self.server_start_button.config(text="Stop Server")
+        threading.Thread(target=self.run_server, daemon=True).start()
+        self.update_server_log("Server started.")
+
+    def stop_server(self):
+        if self.server_running:
+            self.server_running = False
+            for client in self.clients:
+                client.close()
+            self.server.close()
+            self.clients.clear()
+            self.client_public_keys.clear()
+            self.update_server_log("Server stopped.")
+            self.server_start_button.config(text="Start Server")
+
+    def run_server(self):
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self.server.bind((HOST, PORT))
+            self.server.listen()
+            self.update_server_log(f"Listening on {HOST}:{PORT}")
+            while self.server_running:
+                client, address = self.server.accept()
+                threading.Thread(target=self.handle_client, args=(client,address), daemon=True).start()
+        except Exception as e:
+            self.update_server_log(f"Server error: {e}")
+        finally:
+            self.server.close()
+
+    def handle_client(self, client, address):
+        try:
+            client.send(self.serialized_server_public_key)  # Send server's public key to client
+            # First message from client should be their public key
+            public_key_serialized = client.recv(4096)
+            client_public_key = serialization.load_pem_public_key(public_key_serialized, backend=default_backend())
+            self.clients.append(client)
+            self.client_public_keys[client] = client_public_key
+            self.update_server_log(f"Client {address} connected.")
+            while True:
+                encrypted_message = client.recv(4096)
+                if not encrypted_message:
+                    raise ConnectionResetError("Client disconnected.")
+                message = self.decrypt_message(self.server_private_key, encrypted_message)
+                self.update_server_log(f"Client {address}: {message}")
+                self.broadcast_message(message, client)
+        except (ConnectionResetError, OSError):
+            self.update_server_log(f"Client {address} disconnected.")
+        finally:
+            client.close()
+            self.clients.remove(client)
+            del self.client_public_keys[client]
+
+    def broadcast_message(self, message, sender_client):
+        for client in self.clients:
+            if client != sender_client:
+                client_public_key = self.client_public_keys[client]
+                encrypted_message = self.encrypt_message(client_public_key, message)
+                client.send(encrypted_message)
+
+    def toggle_client_connection(self):
+        if not self.client_connected:
+            self.connect_as_client()
         else:
-            chat_app.create_chat_page()
-            chat_app.screen_manager.current = 'Chat'
+            self.disconnect_client()
 
-class InfoPage(GridLayout):
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.cols = 1
-        self.message = Label(halign = 'center', valign = 'middle', font_size = 30)
-        self.message.bind(width = self.update_text_width)
-        self.add_widget(self.message)
-
-    def update_info(self, message):
-        self.message.text = message
-    
-    def update_text_width(self, *_):
-        self.message.text_size = (self.message.width * 0.9, None)
-
-class ChatPage(GridLayout):
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.cols = 1
-        self.rows = 3
-
-        self.history = ScrollableLabel(height = Window.size[1] * 0.9, size_hint_y = None)
-        self.add_widget(self.history)
-
-        self.new_message = TextInput(width = Window.size[0] * 0.8, size_hint_x = None, multiline = False)
-        self.send = Button(text = 'Send')
-        self.send.bind(on_press = self.send_message)
-        socket_client.start_listening(self.incoming_message, show_error)
-        
-        time.sleep(2)
-
-        self.dropdown = DropDown()
-        for name in self.users_online:
-            btn = Button(text=f'{name}', size_hint_y=None, height = self.send.height)
-            btn.bind(on_release=lambda btn: self.dropdown.select(btn.text))
-            self.dropdown.add_widget(btn)
-        self.users_list_btn = Button(size_hint=(None, None))
-        self.users_list_btn.bind(on_release=self.dropdown.open)
-        self.dropdown.bind(on_select=lambda instance, x: setattr(self.users_list_btn, 'text', x))
-
-        bottom_line = GridLayout(cols = 3)
-        bottom_line.add_widget(self.new_message)
-        bottom_line.add_widget(self.send)
-        bottom_line.add_widget(self.users_list_btn)
-        self.add_widget(bottom_line)
-
-        Window.bind(on_key_down = self.on_key_down)
-        
-        Clock.schedule_once(self.focus_text_input, 1)
-        self.bind(size = self.adjust_fields)
-    
-    def adjust_fields(self, *_):
-        if Window.size[1] * 0.1 < 50:
-            new_height = Window.size[1] - 50
+    def connect_as_client(self):
+        self.client_nickname = simpledialog.askstring("Nickname", "Choose your nickname:", parent=self.root)
+        if self.client_nickname:
+            try:
+                self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.client.connect((HOST, PORT))
+                # Send client's public key to server
+                self.client.send(self.client_public_key.public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                ))
+                # Receive server's public key
+                server_public_key_serialized = self.client.recv(4096)
+                self.server_public_key = serialization.load_pem_public_key(server_public_key_serialized, backend=default_backend())
+                self.client_connected = True
+                self.client_connect_button.config(text="Disconnect")
+                threading.Thread(target=self.receive_client_messages, daemon=True).start()
+                self.update_client_log("Connected to the server.")
+            except Exception as e:
+                messagebox.showerror("Connection Failed", str(e))
+                self.client_connected = False
         else:
-            new_height = Window.size[1] * 0.9
-        self.history.height = new_height
-        if Window.size[0] * 0.2 < 160:
-            new_width = Window.size[0] - 160
-        else:
-            new_width = Window.size[0] * 0.8
-        self.new_message.width = new_width
+            messagebox.showinfo("Nickname Required", "Please enter a nickname to connect to the server.")
 
-        Clock.schedule_once(self.history.update_chat_history_layout, 0.01)
+    def disconnect_client(self):
+        if self.client_connected:
+            self.client.close()
+            self.client_connected = False
+            self.client_connect_button.config(text="Connect as Client")
+            self.update_client_log("Disconnected from the server.")
 
-    def on_key_down(self, instance, keyboard, keycode, text, modifiers):
-        if keycode == 40:
-            self.send_message(None)
-    
-    def send_message(self, _):
-        message = self.new_message.text
-        self.new_message.text = ''
-        if message:
-            if self.users_list_btn.text in self.users_online:
-                user_key_pair = {
-                    'user': self.users_list_btn.text,
-                    'key': self.users_online[self.users_list_btn.text]
-                }
-                self.history.update_chat_history(
-                    f'[color=dd2020]{chat_app.connect_page.username.text}[/color] > {message}'
-                )
-                socket_client.send(message, user_key_pair)
-            else:
-                # Handle the case where the selected user is not found in users_online
-                self.history.update_chat_history(
-                    f'[color=dd2020]{chat_app.connect_page.username.text}[/color] > {message} [User not found]'
-                )
-            Clock.schedule_once(self.focus_text_input, 0.1)
+    def send_client_message(self):
+        if self.client_connected and self.client_nickname:
+            message = self.client_message_entry.get()
+            encrypted_message = self.encrypt_message(self.server_public_key, message)
+            self.client.send(encrypted_message)
+            self.client_message_entry.delete(0, tk.END)
 
-    
-    def focus_text_input(self, _):
-        self.new_message.focus = True
-    
-    def incoming_message(self, username, message):
-        if username == '__flag__':
-            self.users_online = eval(message) 
-        else:
-            self.history.update_chat_history(
-                f'[color=20dd20]{username}[/color] > {message}'
+    def receive_client_messages(self):
+        while self.client_connected:
+            try:
+                encrypted_message = self.client.recv(4096)
+                if not encrypted_message:
+                    raise ConnectionResetError("Disconnected from server.")
+                message = self.decrypt_message(self.client_private_key, encrypted_message)
+                self.root.after(0, lambda m=message: self.update_client_log(m))
+            except Exception as e:
+                self.client_connected = False
+                self.root.after(0, lambda: self.update_client_log("Disconnected from server."))
+                break
+
+    def encrypt_message(self, public_key, message):
+        return public_key.encrypt(
+            message.encode(),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
             )
+        )
 
-class ChatAppRSA(App):
+    def decrypt_message(self, private_key, encrypted_message):
+        return private_key.decrypt(
+            encrypted_message,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        ).decode()
 
-    def build(self):
-        self.title="Secure Chat system"
-        self.screen_manager = ScreenManager()
-        self.connect_page = ConnectPage()
-        screen = Screen(name = 'Connect')
-        screen.add_widget(self.connect_page)
-        self.screen_manager.add_widget(screen)
-        self.info_page = InfoPage()
-        screen = Screen(name = 'Info')
-        screen.add_widget(self.info_page)
-        self.screen_manager.add_widget(screen)
-        return self.screen_manager
-    
-    def create_chat_page(self):
-        self.chat_page = ChatPage()
-        screen = Screen(name = 'Chat')
-        screen.add_widget(self.chat_page)
-        self.screen_manager.add_widget(screen)
+    def update_server_log(self, message):
+        self.server_log.config(state="normal")
+        self.server_log.insert(tk.END, message + "\n")
+        self.server_log.config(state="disabled")
+        self.server_log.see(tk.END)
 
-def show_error(message):
-    chat_app.info_page.update_info(message)
-    chat_app.screen_manager.current = 'Info'
-    Clock.schedule_once(sys.exit, 10)
+    def update_client_log(self, message):
+        self.client_log.config(state="normal")
+        self.client_log.insert(tk.END, message + "\n")
+        self.client_log.config(state="disabled")
+        self.client_log.see(tk.END)
 
-if __name__ == '__main__':
-    private_key = None
-    chat_app = ChatAppRSA()
-    chat_app.run()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = CombinedApp(root)
+    root.mainloop()
